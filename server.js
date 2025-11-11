@@ -1,7 +1,7 @@
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
-import stringSimilarity from "string-similarity"; // coincidencia flexible
+import stringSimilarity from "string-similarity";
 
 const app = express();
 app.use(express.json());
@@ -51,6 +51,28 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// ---------- FUNCIÓN DE ENVÍO A WHATSAPP ----------
+async function sendMessage(to, body) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        text: { body },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        },
+      }
+    );
+    console.log("✅ Respuesta enviada:", body);
+  } catch (error) {
+    console.error("❌ Error al enviar mensaje:", error.response?.data || error);
+  }
+}
+
 // ---------- WEBHOOK DE MENSAJES ----------
 app.post("/webhook", async (req, res) => {
   try {
@@ -69,17 +91,27 @@ app.post("/webhook", async (req, res) => {
       const questions = faqData.map((q) => q.pregunta.toLowerCase());
       const answers = faqData.map((q) => q.respuesta);
 
-      // ---------- NUEVA LÓGICA DE COINCIDENCIA ----------
+      // ---------- CREAR LISTA DE SUGERENCIAS DINÁMICAS ----------
+      const suggestions = faqData.slice(0, 5); // Muestra las primeras 5 preguntas del Sheet
+
+      // ---------- SI EL CLIENTE RESPONDE CON UN NÚMERO ----------
+      if (/^\d+$/.test(text)) {
+        const index = parseInt(text, 10) - 1;
+        if (suggestions[index]) {
+          const reply = `✔️ ${suggestions[index].respuesta}`;
+          await sendMessage(from, reply);
+          return res.sendStatus(200);
+        }
+      }
+
+      // ---------- COINCIDENCIA FLEXIBLE ----------
       const match = stringSimilarity.findBestMatch(text, questions);
       const best = match.bestMatch;
 
       let reply;
-
       if (best.rating > 0.4) {
         const index = match.bestMatchIndex;
         const bestAnswer = answers[index];
-
-        // 👇 Plantillas más formales y neutrales
         const templates = [
           `✔️ ${bestAnswer}`,
           `✅ ${bestAnswer}`,
@@ -87,29 +119,18 @@ app.post("/webhook", async (req, res) => {
           `ℹ️ ${bestAnswer}`,
           `De acuerdo. ${bestAnswer}`,
         ];
-
         reply = templates[Math.floor(Math.random() * templates.length)];
       } else {
-        reply =
-          "Disculpe, no he logrado comprender su consulta. ¿Podría reformularla, por favor?";
+        // ---------- SI NO HAY COINCIDENCIA, MOSTRAR OPCIONES ----------
+        let suggestionText =
+          "No he logrado comprender su consulta. ¿Podría especificar uno de los siguientes temas?\n\n";
+        suggestions.forEach((item, i) => {
+          suggestionText += `${i + 1}. ${item.pregunta}\n`;
+        });
+        reply = suggestionText;
       }
 
-      // ---------- ENVÍO A WHATSAPP ----------
-      await axios.post(
-        `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
-        {
-          messaging_product: "whatsapp",
-          to: from,
-          text: { body: reply },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          },
-        }
-      );
-
-      console.log("✅ Respuesta enviada:", reply);
+      await sendMessage(from, reply);
     }
 
     res.sendStatus(200);
