@@ -1,6 +1,7 @@
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
+import stringSimilarity from "string-similarity"; // coincidencia flexible
 
 const app = express();
 app.use(express.json());
@@ -65,68 +66,32 @@ app.post("/webhook", async (req, res) => {
       console.log("📩 Mensaje recibido:", text);
 
       const faqData = await getSheetData();
+      const questions = faqData.map((q) => q.pregunta.toLowerCase());
+      const answers = faqData.map((q) => q.respuesta);
 
-      // ---------- APRENDIZAJE AUTOMÁTICO ----------
-      const dictionary = {};
-      for (const { pregunta, respuesta } of faqData) {
-        const words = pregunta
-          .toLowerCase()
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "") // elimina acentos
-          .replace(/[^\w\s]/g, "")
-          .split(/\s+/)
-          .map((w) => (w.endsWith("s") ? w.slice(0, -1) : w)) // quita plurales simples
-          .filter((w) => w.length > 3);
+      // ---------- NUEVA LÓGICA DE COINCIDENCIA ----------
+      const match = stringSimilarity.findBestMatch(text, questions);
+      const best = match.bestMatch;
 
-        words.forEach((w) => {
-          if (!dictionary[w]) dictionary[w] = [];
-          if (!dictionary[w].includes(respuesta)) dictionary[w].push(respuesta);
-        });
-      }
-
-      // ---------- ANÁLISIS DEL MENSAJE ----------
-      const inputWords = text
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^\w\s]/g, "")
-        .split(/\s+/)
-        .map((w) => (w.endsWith("s") ? w.slice(0, -1) : w));
-
-      const scoreMap = {};
-      inputWords.forEach((word) => {
-        for (const key in dictionary) {
-          if (key.includes(word) || word.includes(key)) {
-            dictionary[key].forEach((resp) => {
-              scoreMap[resp] = (scoreMap[resp] || 0) + 1;
-            });
-          }
-        }
-      });
-
-      // ---------- SELECCIÓN DE RESPUESTA ----------
-      let bestResponse = null;
-      let bestScore = 0;
-      for (const [resp, score] of Object.entries(scoreMap)) {
-        if (score > bestScore) {
-          bestScore = score;
-          bestResponse = resp;
-        }
-      }
-
-      // ---------- RESPUESTA NATURAL ----------
       let reply;
-      if (bestScore > 0) {
-        const humanTemplates = [
-          `Claro 😊 ${bestResponse}`,
-          `Por supuesto 👍 ${bestResponse}`,
-          `Sin problema 😄 ${bestResponse}`,
-          `${bestResponse} 😉`,
+
+      if (best.rating > 0.4) {
+        const index = match.bestMatchIndex;
+        const bestAnswer = answers[index];
+
+        // 👇 Plantillas más formales y neutrales
+        const templates = [
+          `✔️ ${bestAnswer}`,
+          `✅ ${bestAnswer}`,
+          `${bestAnswer}`,
+          `ℹ️ ${bestAnswer}`,
+          `De acuerdo. ${bestAnswer}`,
         ];
-        reply =
-          humanTemplates[Math.floor(Math.random() * humanTemplates.length)];
+
+        reply = templates[Math.floor(Math.random() * templates.length)];
       } else {
         reply =
-          "Perdona 😅, no estoy seguro de haber entendido. ¿Podrías decirlo de otra forma?";
+          "Disculpe, no he logrado comprender su consulta. ¿Podría reformularla, por favor?";
       }
 
       // ---------- ENVÍO A WHATSAPP ----------
