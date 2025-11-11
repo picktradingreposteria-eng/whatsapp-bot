@@ -2,9 +2,6 @@
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
-import dotenv from "dotenv";
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
@@ -12,7 +9,6 @@ app.use(express.json());
 // ---------- CONFIGURACIÓN GOOGLE SHEETS ----------
 async function getSheetData() {
   try {
-    // Credenciales desde variable de entorno en Base64
     const credentials = JSON.parse(
       Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8")
     );
