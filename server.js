@@ -1,4 +1,3 @@
-// ---------- IMPORTACIONES ----------
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
@@ -6,7 +5,7 @@ import { google } from "googleapis";
 const app = express();
 app.use(express.json());
 
-// ---------- CONFIGURACIÓN GOOGLE SHEETS ----------
+// ---------- FUNCIÓN PARA LEER GOOGLE SHEETS ----------
 async function getSheetData() {
   try {
     const credentials = JSON.parse(
@@ -26,14 +25,12 @@ async function getSheetData() {
     });
 
     const rows = response.data.values || [];
-    const faqData = rows.map(([pregunta, respuesta]) => ({
+    return rows.map(([pregunta, respuesta]) => ({
       pregunta,
       respuesta,
     }));
-
-    return faqData;
   } catch (error) {
-    console.error("❌ Error al obtener datos de Google Sheets:", error);
+    console.error("❌ Error al leer Google Sheets:", error);
     return [];
   }
 }
@@ -41,13 +38,12 @@ async function getSheetData() {
 // ---------- WEBHOOK DE VERIFICACIÓN ----------
 app.get("/webhook", (req, res) => {
   const verifyToken = process.env.VERIFY_TOKEN;
-
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode && token === verifyToken) {
-    console.log("✅ Webhook verificado correctamente.");
+    console.log("✅ Webhook verificado correctamente");
     res.status(200).send(challenge);
   } else {
     res.sendStatus(403);
@@ -70,17 +66,17 @@ app.post("/webhook", async (req, res) => {
 
       const faqData = await getSheetData();
 
-      // ---------- ENTRENAMIENTO AUTOMÁTICO ----------
-      // Genera un "diccionario" de palabras clave a respuestas
+      // ---------- APRENDIZAJE AUTOMÁTICO ----------
       const dictionary = {};
       for (const { pregunta, respuesta } of faqData) {
         const words = pregunta
           .toLowerCase()
           .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[\u0300-\u036f]/g, "") // elimina acentos
           .replace(/[^\w\s]/g, "")
           .split(/\s+/)
-          .filter((w) => w.length > 3); // quita palabras como "de", "la", etc.
+          .map((w) => (w.endsWith("s") ? w.slice(0, -1) : w)) // quita plurales simples
+          .filter((w) => w.length > 3);
 
         words.forEach((w) => {
           if (!dictionary[w]) dictionary[w] = [];
@@ -93,9 +89,9 @@ app.post("/webhook", async (req, res) => {
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/[^\w\s]/g, "")
-        .split(/\s+/);
+        .split(/\s+/)
+        .map((w) => (w.endsWith("s") ? w.slice(0, -1) : w));
 
-      // Cuenta coincidencias entre las palabras del mensaje y las del diccionario
       const scoreMap = {};
       inputWords.forEach((word) => {
         for (const key in dictionary) {
@@ -107,7 +103,7 @@ app.post("/webhook", async (req, res) => {
         }
       });
 
-      // ---------- ELEGIR MEJOR RESPUESTA ----------
+      // ---------- SELECCIÓN DE RESPUESTA ----------
       let bestResponse = null;
       let bestScore = 0;
       for (const [resp, score] of Object.entries(scoreMap)) {
@@ -117,11 +113,21 @@ app.post("/webhook", async (req, res) => {
         }
       }
 
-      // ---------- RESPUESTA FINAL ----------
-      const reply =
-        bestScore > 0
-          ? bestResponse
-          : "Perdona, no te he entendido muy bien. ¿Podrías repetirlo o ser un poco más específico?";
+      // ---------- RESPUESTA NATURAL ----------
+      let reply;
+      if (bestScore > 0) {
+        const humanTemplates = [
+          `Claro 😊 ${bestResponse}`,
+          `Por supuesto 👍 ${bestResponse}`,
+          `Sin problema 😄 ${bestResponse}`,
+          `${bestResponse} 😉`,
+        ];
+        reply =
+          humanTemplates[Math.floor(Math.random() * humanTemplates.length)];
+      } else {
+        reply =
+          "Perdona 😅, no estoy seguro de haber entendido. ¿Podrías decirlo de otra forma?";
+      }
 
       // ---------- ENVÍO A WHATSAPP ----------
       await axios.post(
@@ -148,10 +154,8 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-
 // ---------- INICIO DEL SERVIDOR ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor en marcha en el puerto ${PORT}`);
+  console.log(`🚀 Servidor activo en el puerto ${PORT}`);
 });
-
