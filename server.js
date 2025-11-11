@@ -70,36 +70,60 @@ app.post("/webhook", async (req, res) => {
 
       const faqData = await getSheetData();
 
-      // ---------- FUNCIÓN DE SIMILITUD ----------
-      function similarity(a, b) {
-        const wordsA = a.split(/\s+/);
-        const wordsB = b.split(/\s+/);
-        const matches = wordsA.filter((w) => wordsB.includes(w));
-        return matches.length / Math.max(wordsA.length, wordsB.length);
+      // ---------- ENTRENAMIENTO AUTOMÁTICO ----------
+      // Genera un "diccionario" de palabras clave a respuestas
+      const dictionary = {};
+      for (const { pregunta, respuesta } of faqData) {
+        const words = pregunta
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^\w\s]/g, "")
+          .split(/\s+/)
+          .filter((w) => w.length > 3); // quita palabras como "de", "la", etc.
+
+        words.forEach((w) => {
+          if (!dictionary[w]) dictionary[w] = [];
+          if (!dictionary[w].includes(respuesta)) dictionary[w].push(respuesta);
+        });
       }
 
-      let bestMatch = null;
+      // ---------- ANÁLISIS DEL MENSAJE ----------
+      const inputWords = text
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^\w\s]/g, "")
+        .split(/\s+/);
+
+      // Cuenta coincidencias entre las palabras del mensaje y las del diccionario
+      const scoreMap = {};
+      inputWords.forEach((word) => {
+        for (const key in dictionary) {
+          if (key.includes(word) || word.includes(key)) {
+            dictionary[key].forEach((resp) => {
+              scoreMap[resp] = (scoreMap[resp] || 0) + 1;
+            });
+          }
+        }
+      });
+
+      // ---------- ELEGIR MEJOR RESPUESTA ----------
+      let bestResponse = null;
       let bestScore = 0;
-
-      for (const row of faqData) {
-        const question = (row.pregunta || "").toLowerCase().trim();
-        const score = similarity(text, question);
-
+      for (const [resp, score] of Object.entries(scoreMap)) {
         if (score > bestScore) {
           bestScore = score;
-          bestMatch = row;
+          bestResponse = resp;
         }
       }
 
-      let reply;
-      if (bestScore > 0.2) {
-        reply = bestMatch.respuesta;
-      } else {
-        reply =
-          "Perdona, no te he entendido muy bien. ¿Podrías repetirlo o ser un poco más específico?";
-      }
+      // ---------- RESPUESTA FINAL ----------
+      const reply =
+        bestScore > 0
+          ? bestResponse
+          : "Perdona, no te he entendido muy bien. ¿Podrías repetirlo o ser un poco más específico?";
 
-      // ---------- RESPUESTA A WHATSAPP ----------
+      // ---------- ENVÍO A WHATSAPP ----------
       await axios.post(
         `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
         {
@@ -124,8 +148,10 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+
 // ---------- INICIO DEL SERVIDOR ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor en marcha en el puerto ${PORT}`);
 });
+
