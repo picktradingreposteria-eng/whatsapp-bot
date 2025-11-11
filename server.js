@@ -26,30 +26,19 @@ async function getSheetData() {
     });
 
     const rows = response.data.values || [];
-    return rows.map(([pregunta, respuesta]) => ({
-      pregunta,
-      respuesta,
-    }));
+
+    // Filtrar filas vacías o incompletas
+    return rows
+      .filter((row) => row[0] && row[1])
+      .map(([pregunta, respuesta]) => ({
+        pregunta: pregunta.trim(),
+        respuesta: respuesta.trim(),
+      }));
   } catch (error) {
     console.error("❌ Error al leer Google Sheets:", error);
     return [];
   }
 }
-
-// ---------- WEBHOOK DE VERIFICACIÓN ----------
-app.get("/webhook", (req, res) => {
-  const verifyToken = process.env.VERIFY_TOKEN;
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token === verifyToken) {
-    console.log("✅ Webhook verificado correctamente");
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
 
 // ---------- FUNCIÓN DE ENVÍO A WHATSAPP ----------
 async function sendMessage(to, body) {
@@ -73,6 +62,21 @@ async function sendMessage(to, body) {
   }
 }
 
+// ---------- WEBHOOK DE VERIFICACIÓN ----------
+app.get("/webhook", (req, res) => {
+  const verifyToken = process.env.VERIFY_TOKEN;
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode && token === verifyToken) {
+    console.log("✅ Webhook verificado correctamente");
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
 // ---------- WEBHOOK DE MENSAJES ----------
 app.post("/webhook", async (req, res) => {
   try {
@@ -88,45 +92,57 @@ app.post("/webhook", async (req, res) => {
       console.log("📩 Mensaje recibido:", text);
 
       const faqData = await getSheetData();
+
+      if (faqData.length === 0) {
+        await sendMessage(
+          from,
+          "⚠️ No se han encontrado datos en la base de conocimiento. Revise su hoja de Google Sheets."
+        );
+        return res.sendStatus(200);
+      }
+
       const questions = faqData.map((q) => q.pregunta.toLowerCase());
       const answers = faqData.map((q) => q.respuesta);
 
-      // ---------- CREAR LISTA DE SUGERENCIAS DINÁMICAS ----------
-      const suggestions = faqData.slice(0, 5); // Muestra las primeras 5 preguntas del Sheet
-
-      // ---------- SI EL CLIENTE RESPONDE CON UN NÚMERO ----------
+      // Si el cliente responde con un número (de sugerencias)
       if (/^\d+$/.test(text)) {
         const index = parseInt(text, 10) - 1;
-        if (suggestions[index]) {
-          const reply = `✔️ ${suggestions[index].respuesta}`;
+        const suggestionList = faqData.slice(0, 5); // por compatibilidad
+        if (suggestionList[index]) {
+          const reply = `✔️ ${suggestionList[index].respuesta}`;
           await sendMessage(from, reply);
           return res.sendStatus(200);
         }
       }
 
-      // ---------- COINCIDENCIA FLEXIBLE ----------
+      // Buscar coincidencia directa
       const match = stringSimilarity.findBestMatch(text, questions);
       const best = match.bestMatch;
 
       let reply;
-      if (best.rating > 0.4) {
+
+      if (best.rating > 0.5) {
         const index = match.bestMatchIndex;
         const bestAnswer = answers[index];
         const templates = [
-          `✔️ ${bestAnswer}`,
-          `✅ ${bestAnswer}`,
-          `${bestAnswer}`,
           `ℹ️ ${bestAnswer}`,
-          `De acuerdo. ${bestAnswer}`,
+          `✔️ ${bestAnswer}`,
+          `${bestAnswer}`,
+          `✅ ${bestAnswer}`,
         ];
         reply = templates[Math.floor(Math.random() * templates.length)];
       } else {
-        // ---------- SI NO HAY COINCIDENCIA, MOSTRAR OPCIONES ----------
+        // Si no encuentra coincidencia buena → sugerencias más parecidas
+        const sortedMatches = match.ratings
+          .sort((a, b) => b.rating - a.rating)
+          .slice(0, 5);
+
         let suggestionText =
-          "No he logrado comprender su consulta. ¿Podría especificar uno de los siguientes temas?\n\n";
-        suggestions.forEach((item, i) => {
-          suggestionText += `${i + 1}. ${item.pregunta}\n`;
+          "No estoy seguro de haber entendido su consulta. ¿Podría seleccionar una de las siguientes opciones relacionadas?\n\n";
+        sortedMatches.forEach((m, i) => {
+          suggestionText += `${i + 1}. ${faqData[questions.indexOf(m.target)].pregunta}\n`;
         });
+
         reply = suggestionText;
       }
 
