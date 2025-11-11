@@ -1,50 +1,56 @@
+// ---------- IMPORTACIONES ----------
 import express from "express";
-import bodyParser from "body-parser";
 import axios from "axios";
 import { google } from "googleapis";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-
-// --- CONFIGURACIÓN GOOGLE SHEETS ---
-const SHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_RANGE = process.env.SHEET_RANGE || "Preguntas!A2:B";
-
+// ---------- CONFIGURACIÓN GOOGLE SHEETS ----------
 async function getSheetData() {
-  const credentials = JSON.parse(
-    Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8")
-  );
+  try {
+    // Credenciales desde variable de entorno en Base64
+    const credentials = JSON.parse(
+      Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8")
+    );
 
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-  });
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    });
 
-  const sheets = google.sheets({ version: "v4", auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: SHEET_RANGE,
-  });
+    const sheets = google.sheets({ version: "v4", auth });
 
-  const rows = res.data.values || [];
-  const data = rows.map(([pregunta, respuesta]) => ({
-    pregunta: pregunta.toLowerCase(),
-    respuesta,
-  }));
-  return data;
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: process.env.SHEET_RANGE,
+    });
+
+    const rows = response.data.values || [];
+    const faqData = rows.map(([pregunta, respuesta]) => ({
+      pregunta,
+      respuesta,
+    }));
+
+    return faqData;
+  } catch (error) {
+    console.error("❌ Error al obtener datos de Google Sheets:", error);
+    return [];
+  }
 }
 
-// --- WEBHOOK DE VERIFICACIÓN ---
+// ---------- WEBHOOK DE VERIFICACIÓN ----------
 app.get("/webhook", (req, res) => {
+  const verifyToken = process.env.VERIFY_TOKEN;
+
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode && token && mode === "subscribe" && token === VERIFY_TOKEN) {
+  if (mode && token === verifyToken) {
     console.log("✅ Webhook verificado correctamente.");
     res.status(200).send(challenge);
   } else {
@@ -52,81 +58,78 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// --- MANEJO DE MENSAJES ---
+// ---------- WEBHOOK DE MENSAJES ----------
 app.post("/webhook", async (req, res) => {
-  const body = req.body;
-
-  if (body.object) {
-    const entry = body.entry?.[0];
+  try {
+    const entry = req.body.entry?.[0];
     const changes = entry?.changes?.[0];
-    const message = changes?.value?.messages?.[0];
+    const messages = changes?.value?.messages;
 
-    if (message && message.text) {
+    if (messages && messages.length > 0) {
+      const message = messages[0];
       const from = message.from;
-      const text = message.text.body.toLowerCase().trim();
+      const text = (message.text?.body || "").toLowerCase().trim();
 
       console.log("📩 Mensaje recibido:", text);
 
-      let reply = "Disculpa, no te entendí muy bien. ¿Podrías repetirlo? 😊";
+      const faqData = await getSheetData();
 
-      try {
-        const faqData = await getSheetData();
-        // Función para medir similitud entre textos (simple pero eficaz)
-function similarity(a, b) {
-  const wordsA = a.split(/\s+/);
-  const wordsB = b.split(/\s+/);
-  const matches = wordsA.filter((w) => wordsB.includes(w));
-  return matches.length / Math.max(wordsA.length, wordsB.length);
-}
-
-let bestMatch = null;
-let bestScore = 0;
-
-for (const row of faqData) {
-  const score = similarity(text, row.pregunta);
-  if (score > bestScore) {
-    bestScore = score;
-    bestMatch = row;
-  }
-}
-
-// Si la similitud supera cierto umbral, se considera válida
-if (bestScore > 0.3) {
-  reply = bestMatch.respuesta;
-}
-
-
-        if (match) {
-          reply = match.respuesta;
-        }
-
-        await axios.post(
-          `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: from,
-            text: { body: reply },
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-            },
-          }
-        );
-
-        console.log("✅ Respuesta enviada:", reply);
-      } catch (error) {
-        console.error("❌ Error:", error.response?.data || error.message);
+      // ---------- FUNCIÓN DE SIMILITUD ----------
+      function similarity(a, b) {
+        const wordsA = a.split(/\s+/);
+        const wordsB = b.split(/\s+/);
+        const matches = wordsA.filter((w) => wordsB.includes(w));
+        return matches.length / Math.max(wordsA.length, wordsB.length);
       }
+
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const row of faqData) {
+        const question = (row.pregunta || "").toLowerCase().trim();
+        const score = similarity(text, question);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = row;
+        }
+      }
+
+      let reply;
+      if (bestScore > 0.2) {
+        reply = bestMatch.respuesta;
+      } else {
+        reply =
+          "Perdona, no te he entendido muy bien. ¿Podrías repetirlo o ser un poco más específico?";
+      }
+
+      // ---------- RESPUESTA A WHATSAPP ----------
+      await axios.post(
+        `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to: from,
+          text: { body: reply },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          },
+        }
+      );
+
+      console.log("✅ Respuesta enviada:", reply);
     }
 
     res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
+  } catch (error) {
+    console.error("❌ Error en webhook:", error.response?.data || error);
+    res.sendStatus(500);
   }
 });
 
+// ---------- INICIO DEL SERVIDOR ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("🚀 Bot de Horizon CHM conectado y listo en el puerto", PORT));
-
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor en marcha en el puerto ${PORT}`);
+});
