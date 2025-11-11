@@ -6,8 +6,8 @@ import stringSimilarity from "string-similarity";
 const app = express();
 app.use(express.json());
 
-// 🧠 Memoria temporal de sugerencias por usuario
-const userSuggestions = new Map();
+// 🧠 Memoria temporal por usuario
+const userMemory = new Map(); // Guarda el contexto del usuario (último tema y sugerencias)
 
 // ---------- FUNCIÓN PARA LEER GOOGLE SHEETS ----------
 async function getSheetData() {
@@ -97,23 +97,34 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // 🔹 Si el usuario responde con un número (seleccionando una sugerencia)
+      const questions = faqData.map((q) => q.pregunta.toLowerCase());
+      const answers = faqData.map((q) => q.respuesta);
+
+      // Recuperar memoria del usuario
+      let memory = userMemory.get(from) || { lastTopic: null, suggestions: [] };
+
+      // Si responde con un número (opción de sugerencias)
       if (/^\d+$/.test(text)) {
         const index = parseInt(text, 10) - 1;
-        const suggestions = userSuggestions.get(from);
+        const suggestions = memory.suggestions;
         if (suggestions && suggestions[index]) {
-          const reply = `✔️ ${suggestions[index].respuesta}`;
+          const reply = `✅ ${suggestions[index].respuesta}`;
           await sendMessage(from, reply);
-          userSuggestions.delete(from); // limpiar después de responder
+
+          // Actualizar memoria con el nuevo tema
+          memory.lastTopic = suggestions[index].pregunta.toLowerCase();
+          memory.suggestions = [];
+          userMemory.set(from, memory);
           return res.sendStatus(200);
         }
       }
 
-      // 🔹 Buscar coincidencia con similitud
-      const questions = faqData.map((q) => q.pregunta.toLowerCase());
-      const answers = faqData.map((q) => q.respuesta);
+      // Buscar coincidencia flexible
+      const allTexts = questions.map((q) =>
+        memory.lastTopic ? `${memory.lastTopic} ${q}` : q
+      );
 
-      const match = stringSimilarity.findBestMatch(text, questions);
+      const match = stringSimilarity.findBestMatch(text, allTexts);
       const best = match.bestMatch;
 
       let reply;
@@ -122,14 +133,19 @@ app.post("/webhook", async (req, res) => {
         const index = match.bestMatchIndex;
         const bestAnswer = answers[index];
         const templates = [
+          `📍 ${bestAnswer}`,
           `ℹ️ ${bestAnswer}`,
-          `✔️ ${bestAnswer}`,
-          `${bestAnswer}`,
           `✅ ${bestAnswer}`,
+          `🚐 ${bestAnswer}`,
         ];
         reply = templates[Math.floor(Math.random() * templates.length)];
+
+        // Guardar nuevo tema en memoria
+        memory.lastTopic = questions[index];
+        memory.suggestions = [];
+        userMemory.set(from, memory);
       } else {
-        // 🔹 Si no hay coincidencia clara, mostrar sugerencias relacionadas
+        // Si no encuentra coincidencia clara → sugerencias relacionadas
         const sortedMatches = match.ratings
           .sort((a, b) => b.rating - a.rating)
           .slice(0, 5);
@@ -138,10 +154,11 @@ app.post("/webhook", async (req, res) => {
           (m) => faqData[questions.indexOf(m.target)]
         );
 
-        userSuggestions.set(from, relatedSuggestions); // guardar para este número
+        memory.suggestions = relatedSuggestions;
+        userMemory.set(from, memory);
 
         let suggestionText =
-          "No he comprendido completamente su consulta. ¿Podría seleccionar una de las siguientes opciones relacionadas?\n\n";
+          "🔎 No he comprendido completamente su consulta. ¿Podría elegir una de las siguientes opciones relacionadas?\n\n";
         relatedSuggestions.forEach((item, i) => {
           suggestionText += `${i + 1}. ${item.pregunta}\n`;
         });
