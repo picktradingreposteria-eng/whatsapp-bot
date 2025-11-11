@@ -6,6 +6,9 @@ import stringSimilarity from "string-similarity";
 const app = express();
 app.use(express.json());
 
+// 🧠 Memoria temporal de sugerencias por usuario
+const userSuggestions = new Map();
+
 // ---------- FUNCIÓN PARA LEER GOOGLE SHEETS ----------
 async function getSheetData() {
   try {
@@ -27,7 +30,6 @@ async function getSheetData() {
 
     const rows = response.data.values || [];
 
-    // Filtrar filas vacías o incompletas
     return rows
       .filter((row) => row[0] && row[1])
       .map(([pregunta, respuesta]) => ({
@@ -51,9 +53,7 @@ async function sendMessage(to, body) {
         text: { body },
       },
       {
-        headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        },
+        headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
       }
     );
     console.log("✅ Respuesta enviada:", body);
@@ -92,30 +92,27 @@ app.post("/webhook", async (req, res) => {
       console.log("📩 Mensaje recibido:", text);
 
       const faqData = await getSheetData();
-
       if (faqData.length === 0) {
-        await sendMessage(
-          from,
-          "⚠️ No se han encontrado datos en la base de conocimiento. Revise su hoja de Google Sheets."
-        );
+        await sendMessage(from, "⚠️ No se han encontrado datos en la hoja de Google Sheets.");
         return res.sendStatus(200);
       }
 
-      const questions = faqData.map((q) => q.pregunta.toLowerCase());
-      const answers = faqData.map((q) => q.respuesta);
-
-      // Si el cliente responde con un número (de sugerencias)
+      // 🔹 Si el usuario responde con un número (seleccionando una sugerencia)
       if (/^\d+$/.test(text)) {
         const index = parseInt(text, 10) - 1;
-        const suggestionList = faqData.slice(0, 5); // por compatibilidad
-        if (suggestionList[index]) {
-          const reply = `✔️ ${suggestionList[index].respuesta}`;
+        const suggestions = userSuggestions.get(from);
+        if (suggestions && suggestions[index]) {
+          const reply = `✔️ ${suggestions[index].respuesta}`;
           await sendMessage(from, reply);
+          userSuggestions.delete(from); // limpiar después de responder
           return res.sendStatus(200);
         }
       }
 
-      // Buscar coincidencia directa
+      // 🔹 Buscar coincidencia con similitud
+      const questions = faqData.map((q) => q.pregunta.toLowerCase());
+      const answers = faqData.map((q) => q.respuesta);
+
       const match = stringSimilarity.findBestMatch(text, questions);
       const best = match.bestMatch;
 
@@ -132,15 +129,21 @@ app.post("/webhook", async (req, res) => {
         ];
         reply = templates[Math.floor(Math.random() * templates.length)];
       } else {
-        // Si no encuentra coincidencia buena → sugerencias más parecidas
+        // 🔹 Si no hay coincidencia clara, mostrar sugerencias relacionadas
         const sortedMatches = match.ratings
           .sort((a, b) => b.rating - a.rating)
           .slice(0, 5);
 
+        const relatedSuggestions = sortedMatches.map(
+          (m) => faqData[questions.indexOf(m.target)]
+        );
+
+        userSuggestions.set(from, relatedSuggestions); // guardar para este número
+
         let suggestionText =
-          "No estoy seguro de haber entendido su consulta. ¿Podría seleccionar una de las siguientes opciones relacionadas?\n\n";
-        sortedMatches.forEach((m, i) => {
-          suggestionText += `${i + 1}. ${faqData[questions.indexOf(m.target)].pregunta}\n`;
+          "No he comprendido completamente su consulta. ¿Podría seleccionar una de las siguientes opciones relacionadas?\n\n";
+        relatedSuggestions.forEach((item, i) => {
+          suggestionText += `${i + 1}. ${item.pregunta}\n`;
         });
 
         reply = suggestionText;
@@ -158,6 +161,4 @@ app.post("/webhook", async (req, res) => {
 
 // ---------- INICIO DEL SERVIDOR ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor activo en el puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Servidor activo en el puerto ${PORT}`));
