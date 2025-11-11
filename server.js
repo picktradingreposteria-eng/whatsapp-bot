@@ -71,7 +71,30 @@ app.post("/webhook", async (req, res) => {
 
       try {
         const faqData = await getSheetData();
-        const match = faqData.find((row) => text.includes(row.pregunta));
+        // Función para medir similitud entre textos (simple pero eficaz)
+function similarity(a, b) {
+  const wordsA = a.split(/\s+/);
+  const wordsB = b.split(/\s+/);
+  const matches = wordsA.filter((w) => wordsB.includes(w));
+  return matches.length / Math.max(wordsA.length, wordsB.length);
+}
+
+let bestMatch = null;
+let bestScore = 0;
+
+for (const row of faqData) {
+  const score = similarity(text, row.pregunta);
+  if (score > bestScore) {
+    bestScore = score;
+    bestMatch = row;
+  }
+}
+
+// Si la similitud supera cierto umbral, se considera válida
+if (bestScore > 0.3) {
+  reply = bestMatch.respuesta;
+}
+
 
         if (match) {
           reply = match.respuesta;
@@ -106,3 +129,4 @@ app.post("/webhook", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("🚀 Bot de Horizon CHM conectado y listo en el puerto", PORT));
+
