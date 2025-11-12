@@ -6,8 +6,8 @@ import stringSimilarity from "string-similarity";
 const app = express();
 app.use(express.json());
 
-// 🧠 Memoria temporal por usuario
-const userMemory = new Map(); // Guarda el contexto del usuario (último tema y sugerencias)
+// 🧠 Memoria temporal por usuario (contexto y sugerencias)
+const userMemory = new Map();
 
 // ---------- FUNCIÓN PARA LEER GOOGLE SHEETS ----------
 async function getSheetData() {
@@ -103,15 +103,13 @@ app.post("/webhook", async (req, res) => {
       // Recuperar memoria del usuario
       let memory = userMemory.get(from) || { lastTopic: null, suggestions: [] };
 
-      // Si responde con un número (opción de sugerencias)
+      // Si responde con un número (opción sugerida)
       if (/^\d+$/.test(text)) {
         const index = parseInt(text, 10) - 1;
         const suggestions = memory.suggestions;
         if (suggestions && suggestions[index]) {
           const reply = `✅ ${suggestions[index].respuesta}`;
           await sendMessage(from, reply);
-
-          // Actualizar memoria con el nuevo tema
           memory.lastTopic = suggestions[index].pregunta.toLowerCase();
           memory.suggestions = [];
           userMemory.set(from, memory);
@@ -139,8 +137,6 @@ app.post("/webhook", async (req, res) => {
           `🚐 ${bestAnswer}`,
         ];
         reply = templates[Math.floor(Math.random() * templates.length)];
-
-        // Guardar nuevo tema en memoria
         memory.lastTopic = questions[index];
         memory.suggestions = [];
         userMemory.set(from, memory);
@@ -150,18 +146,23 @@ app.post("/webhook", async (req, res) => {
           .sort((a, b) => b.rating - a.rating)
           .slice(0, 5);
 
-        const relatedSuggestions = sortedMatches.map(
-          (m) => faqData[questions.indexOf(m.target)]
-        );
+        const relatedSuggestions = sortedMatches
+          .map((m) => faqData[questions.indexOf(m.target)])
+          .filter((item) => item && item.pregunta && item.respuesta); // ✅ Evita undefined
 
         memory.suggestions = relatedSuggestions;
         userMemory.set(from, memory);
 
         let suggestionText =
           "🔎 No he comprendido completamente su consulta. ¿Podría elegir una de las siguientes opciones relacionadas?\n\n";
-        relatedSuggestions.forEach((item, i) => {
-          suggestionText += `${i + 1}. ${item.pregunta}\n`;
-        });
+
+        if (relatedSuggestions.length > 0) {
+          relatedSuggestions.forEach((item, i) => {
+            suggestionText += `${i + 1}. ${item.pregunta}\n`;
+          });
+        } else {
+          suggestionText += "No he encontrado opciones similares en este momento.";
+        }
 
         reply = suggestionText;
       }
