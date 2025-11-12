@@ -6,10 +6,7 @@ import stringSimilarity from "string-similarity";
 const app = express();
 app.use(express.json());
 
-// 🧠 Memoria temporal por usuario (contexto y sugerencias)
-const userMemory = new Map();
-
-// ---------- FUNCIÓN PARA LEER GOOGLE SHEETS ----------
+// ---------- LEER GOOGLE SHEETS ----------
 async function getSheetData() {
   try {
     const credentials = JSON.parse(
@@ -25,40 +22,20 @@ async function getSheetData() {
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: process.env.SPREADSHEET_ID,
-      range: process.env.SHEET_RANGE,
+      range: process.env.SHEET_RANGE, // Ej: "Preguntas_frecuentes!A2:C"
     });
 
     const rows = response.data.values || [];
-
     return rows
-      .filter((row) => row[0] && row[1])
-      .map(([pregunta, respuesta]) => ({
-        pregunta: pregunta.trim(),
-        respuesta: respuesta.trim(),
+      .filter((r) => r[0] && r[1] && r[2])
+      .map(([tema, pregunta, respuesta]) => ({
+        tema,
+        pregunta,
+        respuesta,
       }));
   } catch (error) {
     console.error("❌ Error al leer Google Sheets:", error);
     return [];
-  }
-}
-
-// ---------- FUNCIÓN DE ENVÍO A WHATSAPP ----------
-async function sendMessage(to, body) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to,
-        text: { body },
-      },
-      {
-        headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
-      }
-    );
-    console.log("✅ Respuesta enviada:", body);
-  } catch (error) {
-    console.error("❌ Error al enviar mensaje:", error.response?.data || error);
   }
 }
 
@@ -77,6 +54,9 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// ---------- MEMORIA DE SESIÓN ----------
+const userMemory = new Map();
+
 // ---------- WEBHOOK DE MENSAJES ----------
 app.post("/webhook", async (req, res) => {
   try {
@@ -92,82 +72,83 @@ app.post("/webhook", async (req, res) => {
       console.log("📩 Mensaje recibido:", text);
 
       const faqData = await getSheetData();
-      if (faqData.length === 0) {
-        await sendMessage(from, "⚠️ No se han encontrado datos en la hoja de Google Sheets.");
-        return res.sendStatus(200);
-      }
+      const questions = faqData.map((f) => f.pregunta.toLowerCase());
 
-      const questions = faqData.map((q) => q.pregunta.toLowerCase());
-      const answers = faqData.map((q) => q.respuesta);
+      const match = stringSimilarity.findBestMatch(text, questions);
+      const best = faqData[match.bestMatchIndex];
+      const bestRating = match.bestMatch.rating;
 
       // Recuperar memoria del usuario
-      let memory = userMemory.get(from) || { lastTopic: null, suggestions: [] };
+      const memory = userMemory.get(from) || {};
 
-      // Si responde con un número (opción sugerida)
-      if (/^\d+$/.test(text)) {
-        const index = parseInt(text, 10) - 1;
-        const suggestions = memory.suggestions;
-        if (suggestions && suggestions[index]) {
-          const reply = `✅ ${suggestions[index].respuesta}`;
-          await sendMessage(from, reply);
-          memory.lastTopic = suggestions[index].pregunta.toLowerCase();
-          memory.suggestions = [];
-          userMemory.set(from, memory);
-          return res.sendStatus(200);
-        }
-      }
+      let reply = "";
 
-      // Buscar coincidencia flexible
-      const allTexts = questions.map((q) =>
-        memory.lastTopic ? `${memory.lastTopic} ${q}` : q
-      );
-
-      const match = stringSimilarity.findBestMatch(text, allTexts);
-      const best = match.bestMatch;
-
-      let reply;
-
-      if (best.rating > 0.5) {
-        const index = match.bestMatchIndex;
-        const bestAnswer = answers[index];
-        const templates = [
-          `📍 ${bestAnswer}`,
-          `ℹ️ ${bestAnswer}`,
-          `✅ ${bestAnswer}`,
-          `🚐 ${bestAnswer}`,
+      if (bestRating > 0.6) {
+        // ✅ Respuesta encontrada
+        const formalTemplates = [
+          `✅ ${best.respuesta}`,
+          `📘 ${best.respuesta}`,
+          `ℹ️ ${best.respuesta}`,
+          `${best.respuesta}`,
         ];
-        reply = templates[Math.floor(Math.random() * templates.length)];
-        memory.lastTopic = questions[index];
-        memory.suggestions = [];
-        userMemory.set(from, memory);
+        reply =
+          formalTemplates[Math.floor(Math.random() * formalTemplates.length)];
+        memory.suggestions = null;
       } else {
-        // Si no encuentra coincidencia clara → sugerencias relacionadas
-        const sortedMatches = match.ratings
-          .sort((a, b) => b.rating - a.rating)
-          .slice(0, 5);
+        // ❌ No coincidencia clara → buscar tema predominante
+        const temaPalabras = text.split(/\s+/);
+        const temasCoincidentes = faqData.filter((f) =>
+          temaPalabras.some((p) => f.tema.toLowerCase().includes(p))
+        );
 
-        const relatedSuggestions = sortedMatches
-          .map((m) => faqData[questions.indexOf(m.target)])
-          .filter((item) => item && item.pregunta && item.respuesta); // ✅ Evita undefined
+        // Si no se detecta tema → mostrar opciones generales
+        const temaSeleccionado =
+          temasCoincidentes.length > 0
+            ? temasCoincidentes[0].tema
+            : faqData[0].tema;
 
-        memory.suggestions = relatedSuggestions;
-        userMemory.set(from, memory);
+        const related = faqData.filter((f) => f.tema === temaSeleccionado);
 
-        let suggestionText =
-          "🔎 No he comprendido completamente su consulta. ¿Podría elegir una de las siguientes opciones relacionadas?\n\n";
+        let suggestionText = `No he encontrado una respuesta exacta, pero parece estar relacionado con *${temaSeleccionado}*.\nPodría elegir una de estas opciones:\n\n`;
+        related.slice(0, 5).forEach((item, i) => {
+          suggestionText += `${i + 1}. ${item.pregunta}\n`;
+        });
 
-        if (relatedSuggestions.length > 0) {
-          relatedSuggestions.forEach((item, i) => {
-            suggestionText += `${i + 1}. ${item.pregunta}\n`;
-          });
-        } else {
-          suggestionText += "No he encontrado opciones similares en este momento.";
-        }
-
+        memory.suggestions = related;
         reply = suggestionText;
       }
 
-      await sendMessage(from, reply);
+      userMemory.set(from, memory);
+
+      // ---------- RESPUESTA A OPCIÓN NUMÉRICA ----------
+      if (/^\d+$/.test(text) && memory.suggestions) {
+        const index = parseInt(text) - 1;
+        const selected = memory.suggestions[index];
+        if (selected) {
+          reply = selected.respuesta;
+          memory.suggestions = null;
+          userMemory.set(from, memory);
+        } else {
+          reply = "Por favor, seleccione un número válido.";
+        }
+      }
+
+      // ---------- ENVÍO A WHATSAPP ----------
+      await axios.post(
+        `https://graph.facebook.com/v17.0/${process.env.PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to: from,
+          text: { body: reply },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          },
+        }
+      );
+
+      console.log("✅ Respuesta enviada:", reply);
     }
 
     res.sendStatus(200);
@@ -179,4 +160,6 @@ app.post("/webhook", async (req, res) => {
 
 // ---------- INICIO DEL SERVIDOR ----------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor activo en el puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor activo en el puerto ${PORT}`);
+});
