@@ -83,7 +83,7 @@ app.post("/webhook", async (req, res) => {
 
       let reply = "";
 
-      if (bestRating > 0.6) {
+      if (bestRating > 0.4) {
         // ✅ Respuesta encontrada
         const formalTemplates = [
           `✅ ${best.respuesta}`,
@@ -163,3 +163,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor activo en el puerto ${PORT}`);
 });
+
